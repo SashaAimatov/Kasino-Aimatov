@@ -24,7 +24,7 @@ def init_db():
         )
     """)
     
-    # Креирање на Банката на Казиното (ID = 0)
+    # Создание аккаунта Банка Казино (ID = 0)
     cursor.execute("""
         INSERT INTO players (user_id, username, balance, aima_id, banned)
         VALUES (0, '🏛 Aimatov Casino (Банк)', 100000000.0, 'AIMA-0000-0000-BANK-RESERVE', 0)
@@ -105,7 +105,7 @@ def set_ban(target, ban_status):
 
 def transfer_money(sender_id, target_str, amount):
     if amount <= 0:
-        return {"error": "Сумата мора да биде поголема од 0"}
+        return {"error": "Сумма должна быть больше 0"}
     conn = get_conn()
     cursor = conn.cursor()
     
@@ -113,13 +113,13 @@ def transfer_money(sender_id, target_str, amount):
     sender = cursor.fetchone()
     if not sender:
         cursor.close(); conn.close()
-        return {"error": "Испраќачот не е пронајден"}
+        return {"error": "Отправитель не найден"}
     if sender[1] == 1:
         cursor.close(); conn.close()
-        return {"error": "Вашиот профил е блокиран"}
+        return {"error": "Ваш аккаунт заблокирован"}
     if sender[0] < amount:
         cursor.close(); conn.close()
-        return {"error": "Немате доволно средства"}
+        return {"error": "Недостаточно средств на балансе"}
 
     target_clean = str(target_str).strip()
     if target_clean.isdigit():
@@ -130,12 +130,12 @@ def transfer_money(sender_id, target_str, amount):
     recipient = cursor.fetchone()
     if not recipient:
         cursor.close(); conn.close()
-        return {"error": "Примачот не е пронајден во базата"}
+        return {"error": "Получатель не найден в базе"}
         
     rec_id, rec_name = recipient[0], recipient[1]
     if rec_id == sender_id:
         cursor.close(); conn.close()
-        return {"error": "Не можете да си префртите пари на самите себе"}
+        return {"error": "Нельзя переводить средства самому себе"}
 
     cursor.execute("UPDATE players SET balance = balance - %s WHERE user_id = %s", (amount, sender_id))
     cursor.execute("UPDATE players SET balance = balance + %s WHERE user_id = %s", (amount, rec_id))
