@@ -2,16 +2,26 @@ import threading
 import math
 import random
 import time
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 import config
 import database as db
 
-app = FastAPI()
+# Современный запуск бота в фоновом потоке при старте сервера
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init_db()
+    bot_thread = threading.Thread(target=bot.infinity_polling, kwargs={"skip_pending": True}, daemon=True)
+    bot_thread.start()
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -95,11 +105,6 @@ def cmd_ban(message):
 class UserReq(BaseModel):
     user_id: int
     username: str = "Player"
-
-@app.on_event("startup")
-def startup():
-    db.init_db()
-    threading.Thread(target=bot.infinity_polling, kwargs={"skip_pending": True}, daemon=True).start()
 
 @app.get("/")
 def root():
