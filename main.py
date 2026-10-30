@@ -1,162 +1,204 @@
+import hashlib
+import hmac
+import html
+import json
 import threading
+import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from typing import Optional
+from urllib.parse import parse_qsl
+
+import telebot
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 import config
 import database as db
+import games
+
+bot = telebot.TeleBot(config.BOT_TOKEN, parse_mode="HTML")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    bot_thread = threading.Thread(
-        target=bot.infinity_polling,
-        kwargs={"skip_pending": True},
-        daemon=True
-    )
-    bot_thread.start()
+    threading.Thread(target=bot.infinity_polling, kwargs={"skip_pending": True}, daemon=True).start()
     yield
 
-app = FastAPI(lifespan=lifespan)
 
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=config.ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Init-Data"],
 )
 
-bot = telebot.TeleBot(config.BOT_TOKEN, parse_mode="HTML")
 
-def format_forbes():
-    rows = db.get_forbes_list(50)
-    return [
-        {
-            "username": str(r["username"] or "Игрок"),
-            "aima_id": str(r["aima_id"]),
-            "balance": int(r["balance"])
-        }
-        for r in rows
-    ]
+# ================= ПРОВЕРКА ЛИЧНОСТИ (подпись Telegram) =================
+def current_user(x_init_data: str = Header(default="")):
+    """user_id берётся только из подписанных Telegram данных, подделать его нельзя."""
+    try:
+        data = dict(parse_qsl(x_init_data, keep_blank_values=True))
+        got = data.pop("hash")
+        check = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+        key = hmac.new(b"WebAppData", config.BOT_TOKEN.encode(), hashlib.sha256).digest()
+        calc = hmac.new(key, check.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calc, got) or time.time() - int(data["auth_date"]) > 7 * 86400:
+            raise ValueError
+        u = json.loads(data["user"])
+        return int(u["id"]), (u.get("first_name") or "Player")
+    except Exception:
+        raise HTTPException(401, "Откройте игру через Telegram-бота")
 
-@bot.message_handler(commands=['start'])
-def cmd_start(message):
-    player = db.get_or_create_player(message.from_user.id, message.from_user.first_name)
-    if player.get("is_banned"):
-        bot.send_message(message.chat.id, "🚫 Ваш аккаунт заблокирован.")
-        return
 
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton(
-        text="🕹 Открыть Kasino Aimatov",
-        web_app=WebAppInfo(url=config.WEBAPP_URL)
-    ))
+def run(fn, user, *args, own=True):
+    """Выполняет действие в одной транзакции. own=False — функция сама блокирует строки игроков."""
+    uid, name = user
+    try:
+        with db.tx() as cur:
+            if own:
+                db.get_player(cur, uid, name)
+            return fn(cur, uid, *args)
+    except db.GameError as e:
+        raise HTTPException(400, str(e))
 
-    text = (
-        f"🏛 <b>Aimatov Silver Group</b>\n\n"
-        f"👤 Игрок: <b>{player['username']}</b>\n"
-        f"💳 Ваш AIMA-ID:\n<code>{player['aima_id']}</code>\n"
-        f"💰 Счет игрока: <b>{int(player['balance']):,} ASG</b>"
-    )
-    bot.send_message(message.chat.id, text, reply_markup=markup)
 
-@bot.message_handler(commands=['setbal', 'set'])
-def cmd_balance(message):
-    if message.from_user.id != config.ADMIN_ID:
-        return
-    args = message.text.split()
-    if len(args) != 3:
-        bot.send_message(message.chat.id, "⚠️ Формат: <code>/setbal ID СУММА</code>")
-        return
-    if db.update_balance_by_target(args[1].strip(), float(args[2]), mode="set"):
-        bot.send_message(message.chat.id, f"✅ Баланс <code>{args[1]}</code> установлен на <b>{int(float(args[2])):,} ASG</b>")
-    else:
-        bot.send_message(message.chat.id, "❌ Игрок не найден.")
+# ================= API =================
+class PlayReq(BaseModel):
+    game: str
+    bet: int
+    choice: str = ""
 
-@bot.message_handler(commands=['give'])
-def cmd_give(message):
-    if message.from_user.id != config.ADMIN_ID:
-        return
-    args = message.text.split()
-    if len(args) == 3:
-        db.update_balance_by_target(args[1].strip(), float(args[2]), mode="give")
-        bot.send_message(message.chat.id, "✅ Баланс обновлен.")
 
-@bot.message_handler(commands=['casino'])
-def cmd_casino(message):
-    if message.from_user.id != config.ADMIN_ID:
-        return
-    args = message.text.split()
-    if len(args) == 2:
-        amount = int(float(args[1]))
-        db.set_casino_bank(amount)
-        bot.send_message(message.chat.id, f"🏛 Банк Казино установлен на: <b>{amount:,} ASG</b>")
+class StartReq(BaseModel):
+    game: str
+    bet: int
+    bombs: int = 3
 
-class UserReq(BaseModel):
-    user_id: int
-    username: str = "Player"
 
-class SyncReq(BaseModel):
-    user_id: int
-    username: str = "Player"
-    balance_delta: int
-    bank_delta: int
+class ActReq(BaseModel):
+    game: str
+    action: str = ""
+    idx: Optional[int] = None
+    direction: Optional[str] = None
+
+
+class MintReq(BaseModel):
+    n: int
+
+
+class RaidReq(BaseModel):
+    target_aima: str = ""
+
 
 class TransferReq(BaseModel):
-    user_id: int
     target_aima: str
     amount: int
 
-class RaidReq(BaseModel):
-    user_id: int
-    target_aima: str = ""
 
 @app.get("/")
 def root():
     return {"status": "ok"}
 
-@app.post("/api/user")
-def api_user(req: UserReq):
-    p = db.get_or_create_player(req.user_id, req.username)
-    return {
-        "aima_id": p["aima_id"],
-        "balance": int(p["balance"]),
-        "casino_bank": int(db.get_casino_bank()),
-        "forbes": format_forbes()
-    }
 
-@app.post("/api/sync")
-def api_sync(req: SyncReq):
-    db.get_or_create_player(req.user_id, req.username)
-    res = db.sync_player_delta(req.user_id, req.balance_delta, req.bank_delta)
-    return {
-        "balance": int(res["balance"]) if res else 0,
-        "casino_bank": int(db.get_casino_bank()),
-        "forbes": format_forbes()
-    }
+def _user(cur, uid):
+    p = db.get_player(cur, uid)
+    return {"aima_id": p["aima_id"], "balance": p["balance"],
+            "casino_bank": db.bank(cur), "forbes": db.get_forbes(cur)}
+
+
+@app.post("/api/user")
+def api_user(u=Depends(current_user)):
+    return run(_user, u)
+
 
 @app.get("/api/forbes")
-@app.post("/api/forbes")
 def api_forbes():
-    return {
-        "casino_bank": int(db.get_casino_bank()),
-        "leaders": format_forbes()
-    }
+    with db.tx() as cur:
+        return {"casino_bank": db.bank(cur), "leaders": db.get_forbes(cur)}
 
-@app.post("/api/transfer")
-def api_transfer(req: TransferReq):
-    res = db.transfer_asg(req.user_id, req.target_aima, req.amount)
-    if "error" in res:
-        raise HTTPException(status_code=400, detail=res["error"])
-    return res
+
+@app.post("/api/play")
+def api_play(r: PlayReq, u=Depends(current_user)):
+    return run(games.play, u, r.game, r.bet, r.choice)
+
+
+@app.post("/api/start")
+def api_start(r: StartReq, u=Depends(current_user)):
+    return run(games.start, u, r.game, r.bet, r.bombs)
+
+
+@app.post("/api/act")
+def api_act(r: ActReq, u=Depends(current_user)):
+    return run(games.act, u, r.game, r.action, r.idx, r.direction)
+
+
+@app.post("/api/mint")
+def api_mint(r: MintReq, u=Depends(current_user)):
+    return run(games.mint, u, r.n)
+
 
 @app.post("/api/collector_raid")
-def api_collector_raid(req: RaidReq):
-    res = db.collector_raid_action(req.user_id, req.target_aima)
-    if "error" in res:
-        raise HTTPException(status_code=400, detail=res["error"])
-    return res
+def api_collector_raid(r: RaidReq, u=Depends(current_user)):
+    return run(games.raid, u, r.target_aima.strip(), own=False)
+
+
+@app.post("/api/transfer")
+def api_transfer(r: TransferReq, u=Depends(current_user)):
+    return run(games.transfer, u, r.target_aima.strip(), r.amount, own=False)
+
+
+# ================= БОТ =================
+def is_admin(m):
+    return m.from_user.id == config.ADMIN_ID
+
+
+@bot.message_handler(commands=["start"])
+def cmd_start(message):
+    with db.tx() as cur:
+        p = db.get_player(cur, message.from_user.id, message.from_user.first_name, banned_ok=True)
+    if p["is_banned"]:
+        bot.send_message(message.chat.id, "🚫 Ваш аккаунт заблокирован.")
+        return
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🕹 Открыть Kasino Aimatov", web_app=WebAppInfo(url=config.WEBAPP_URL)))
+    bot.send_message(
+        message.chat.id,
+        f"🏛 <b>Aimatov Silver Group</b>\n\n"
+        f"👤 Игрок: <b>{html.escape(p['username'] or '')}</b>\n"
+        f"💳 Ваш AIMA-ID:\n<code>{p['aima_id']}</code>\n"
+        f"💰 Счет игрока: <b>{int(p['balance']):,} ASG</b>",
+        reply_markup=markup)
+
+
+@bot.message_handler(commands=["setbal", "set", "give"], func=is_admin)
+def cmd_balance(message):
+    a = message.text.split()
+    mode = "give" if a[0].startswith("/give") else "set"
+    if len(a) != 3:
+        bot.send_message(message.chat.id, f"⚠️ Формат: <code>/{'give' if mode == 'give' else 'setbal'} ID СУММА</code>")
+        return
+    try:
+        amount = int(float(a[2]))
+        ok = db.admin_balance(a[1].strip(), amount, mode)
+    except ValueError:
+        bot.send_message(message.chat.id, "⚠️ ID и сумма должны быть числами (или AIMA-ID).")
+        return
+    text = f"✅ <code>{html.escape(a[1])}</code>: {'начислено' if mode == 'give' else 'баланс'} {amount:,} ASG" \
+        if ok else "❌ Игрок не найден."
+    bot.send_message(message.chat.id, text)
+
+
+@bot.message_handler(commands=["casino"], func=is_admin)
+def cmd_casino(message):
+    a = message.text.split()
+    try:
+        amount = int(float(a[1]))
+    except (IndexError, ValueError):
+        bot.send_message(message.chat.id, "⚠️ Формат: <code>/casino СУММА</code>")
+        return
+    db.set_bank(amount)
+    bot.send_message(message.chat.id, f"🏛 Банк Казино установлен на: <b>{max(0, amount):,} ASG</b>")
