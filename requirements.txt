@@ -1,6 +1,5 @@
 fastapi
 uvicorn
 aiogram==2.25.2
-aiohttp>=3.9.0
 psycopg2-binary
 pydantic
