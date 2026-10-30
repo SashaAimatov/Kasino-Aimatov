@@ -1,10 +1,10 @@
 import os
 
-# Берем токен из переменных окружения (нужно будет добавить в Render)
-BOT_TOKEN = os.getenv("BOT_TOKEN", "ТВОЙ_ТОКЕН")
+# Токен твоего Telegram-бота от @BotFather
+BOT_TOKEN = ""
 
-# Ссылка на твой HTML сайт на GitHub Pages
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://ТВОЙ-ЛОГИН.github.io/ТВОЙ-РЕПОЗИТОРИЙ/")
+# Ссылка на Mini App (GitHub Pages)
+WEBAPP_URL = "https://sashaimatov.github.io/Kasino-Aimatov/"
 
-# Render автоматически выдаст эту переменную при создании БД
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+# Вставь скопированную ссылку из Internal Database URL (метод .strip() уберет любые скрытые пробелы)
+DATABASE_URL = "postgresql://aimatov_db_user:Ce38bdDcimM91CPFudbvFbaXSHQnLNlS@dpg-dbi1irgm7kps73bk6710-a/aimatov_db".strip()
