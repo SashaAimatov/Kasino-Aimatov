@@ -1,6 +1,6 @@
 import os
 
-# Теперь токен и база данных берутся из секретных настроек сервера, а не из файла
-BOT_TOKEN = os.getenv("BOT_TOKEN", "тут_мог_быть_дефолтный_токен_но_лучше_пусто")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://kasino-aimatov.onrender.com")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://sashaimatov.github.io/Cazino-/")
+ADMIN_ID = 5399819309 # Твой ID для админ-команд
