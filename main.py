@@ -1,25 +1,19 @@
-import os
 import asyncio
+import math
 import random
-from fastapi import FastAPI
+import time
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import uvicorn
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.types.web_app_info import WebAppInfo
-from aiogram.filters import Command
-
-from config import BOT_TOKEN, WEBAPP_URL
-from database import (
-    init_db, get_player, update_balance, 
-    transfer_money, get_all_leaderboard, 
-    set_balance, set_ban
-)
+import config
+import database as db
 
 app = FastAPI()
 
+# Разрешаем запросы с твоего GitHub Pages
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,236 +22,250 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class PlayRequest(BaseModel):
-    user_id: int
-    username: str = None
-    bet: float
+bot = Bot(token=config.BOT_TOKEN)
+dp = Dispatcher(bot)
 
-class FarmRequest(BaseModel):
-    user_id: int
+# ================= ТЕЛЕГРАМ БОТ =================
 
-class TransferRequest(BaseModel):
-    sender_id: int
-    target: str
-    amount: float
+@dp.message_handler(commands=['start'])
+async def cmd_start(message: types.Message):
+    player = db.get_or_create_player(message.from_user.id, message.from_user.first_name)
+    if player["is_banned"]:
+        await message.answer("🚫 Ваш аккаунт заблокирован службой безопасности Aimatov Silver Group.")
+        return
 
-@app.get("/api/user/{user_id}")
-def api_get_user(user_id: int, username: str = None):
-    return get_player(user_id, username)
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(
+        text="🕹 Открыть Aimatov Casino",
+        web_app=WebAppInfo(url=config.WEBAPP_URL)
+    ))
 
-@app.get("/api/leaderboard")
-def api_leaderboard():
-    return get_all_leaderboard()
-
-@app.post("/api/transfer")
-def api_transfer(req: TransferRequest):
-    return transfer_money(req.sender_id, req.target, req.amount)
-
-@app.post("/api/farm")
-def api_farm(req: FarmRequest):
-    p = get_player(req.user_id)
-    if p["banned"] == 1:
-        return {"error": "Ваш аккаунт заблокирован"}
-    new_bal = update_balance(req.user_id, 0.35, affect_casino=True)
-    return {"status": "ok", "new_balance": new_bal, "earned": 0.35}
-
-# Функция отправки угроз должникам (при уходе в минус, например из-за штрафов или автокликеров)
-async def send_debt_threat(bot_instance, user_id, balance):
-    try:
-        threats = [
-            ("⚠️ ВНИМАНИЕ, ДОЛЖНИК!", f"Твой баланс улетел в минус: **{balance:,.2f} ASG**. Служба безопасности Aimatov Silver Group уже выехала за твоим ПК. Срочно погаси долг!"),
-            ("🚨 КОЛЛЕКТОРЫ УЖЕ В ПУТИ", f"Ты задолжал казино **{abs(balance):,.2f} ASG**! Если не вернешь долг немедленно, твои пиксели будут конфискованы в пользу банка."),
-            ("💀 ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ", f"Уход в минус на **{balance:,.2f} ASG** не останется безнаказанным. Жди гостей в чате.")
-        ]
-        title, text = random.choice(threats)
-        await bot_instance.send_message(
-            user_id, 
-            f"<b>{title}</b>\n\n{text}", 
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        print(f"Не удалось отправить угрозу пользователю {user_id}: {e}")
-
-@app.post("/api/play/{game}")
-def api_play_game(game: str, req: PlayRequest):
-    p = get_player(req.user_id, req.username)
-    if p["banned"] == 1:
-        return {"error": "Ваш аккаунт заблокирован администратором", "balance": p["balance"]}
-        
-    bet = req.bet
-    if bet <= 0:
-        return {"error": "Некорректная ставка", "balance": p["balance"]}
-
-    win_amount = 0.0
-    details = ""
-
-    if game == "slots":
-        syms = ["7", "BAR", "CHERRY", "LEMON", "DIAMOND"]
-        r1, r2, r3 = random.choice(syms), random.choice(syms), random.choice(syms)
-        if r1 == "7" and r2 == "7" and r3 == "7": win_amount = bet * 25
-        elif r1 == r2 == r3: win_amount = bet * 10
-        elif r1 == r2 or r2 == r3 or r1 == r3: win_amount = bet * 2
-        details = f"{r1} | {r2} | {r3}"
-
-    elif game == "coinflip":
-        win = random.choice([True, False])
-        if win: win_amount = bet * 1.95
-        details = "Орел" if win else "Решка"
-
-    elif game == "mines":
-        win = random.random() < 0.45
-        if win: win_amount = bet * 2.8
-        details = "Успех" if win else "Подрыв"
-
-    elif game == "crash":
-        mult = round(1.0 + random.expovariate(0.8), 2)
-        win = mult > 1.35
-        if win: win_amount = bet * mult
-        details = f"x{mult}"
-
-    elif game == "plinko":
-        mult = random.choice([0.2, 0.5, 1.0, 1.5, 3.0, 10.0])
-        win_amount = bet * mult
-        details = f"x{mult}"
-
-    elif game == "tower":
-        win = random.random() < 0.4
-        if win: win_amount = bet * 3.1
-        details = "Пройдено" if win else "Обвал"
-
-    elif game == "bj":
-        win = random.choice([True, False, False])
-        if win: win_amount = bet * 2.0
-        details = "Игрок" if win else "Дилер"
-
-    elif game == "wheel":
-        mult = random.choice([0, 0.5, 1.0, 2.0, 5.0])
-        win_amount = bet * mult
-        details = f"x{mult}"
-
-    elif game == "hilo":
-        win = random.choice([True, False])
-        if win: win_amount = bet * 2.35
-        details = "Угадал" if win else "Мимо"
-    else:
-        return {"error": "Неизвестная игра"}
-
-    profit = win_amount - bet
-    new_bal = update_balance(req.user_id, profit, affect_casino=True)
-    
-    if new_bal < 0:
-        asyncio.create_task(send_debt_threat(bot, req.user_id, new_bal))
-    
-    return {
-        "win": win_amount > 0,
-        "payout": win_amount,
-        "new_balance": new_bal,
-        "details": details
-    }
-
-# --- ТЕЛЕГРАМ БОТ И АДМИН-ПАНЕЛЬ ---
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-ADMIN_ID = 5399819309
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    uname = message.from_user.username or message.from_user.first_name or "Player"
-    p = get_player(message.from_user.id, uname)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🕹 Открыть Aimatov Casino", web_app=WebAppInfo(url=WEBAPP_URL))]
-    ])
-    await message.answer(
-        f"🏛 <b>Aimatov Silver Group</b>\n\n"
-        f"👤 Игрок: <b>{uname}</b>\n"
-        f"💳 Ваш AIMA-ID: <code>{p['aima_id']}</code>\n"
-        f"💰 Баланс: <b>{p['balance']:,.2f} ASG</b>",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-
-@dp.message(Command("admin"))
-async def cmd_admin(message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return await message.answer("❌ У вас нет доступа к этой команде.")
-        
-    leaders = get_all_leaderboard()
     text = (
-        "👑 <b>АДМИН-ПАНЕЛЬ AIMATOV SILVER</b>\n\n"
-        "<b>Команды управления:</b>\n"
-        "• <code>/give ID СУММА</code> — начислить / списать\n"
-        "• <code>/setbal ID СУММА</code> — установить точный баланс\n"
-        "• <code>/casino СУММА</code> — установить баланс Банка Казино\n"
-        "• <code>/ban ID</code> / <code>/unban ID</code> — бан / разбан\n\n"
-        "📊 <b>Все участники в базе:</b>\n"
+        f"🏛 <b>Aimatov Silver Group</b>\n\n"
+        f"👤 Игрок: <b>{player['username']}</b>\n"
+        f"💳 Ваш AIMA-ID:\n<code>{player['aima_id']}</code>\n"
+        f"💰 Баланс: <b>{player['balance']:,.2f} ASG</b>"
     )
-    for i, u in enumerate(leaders, 1):
-        status = "🚫" if u["banned"] else ("🏛" if u["is_casino"] else "👤")
-        text += f"{i}. {status} <b>{u['username']}</b> (ID: <code>{u['user_id']}</code>) — {u['balance']:,.2f} ASG\n"
-        
+    await message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+@dp.message_handler(commands=['admin'])
+async def cmd_admin(message: types.Message):
+    if message.from_user.id != config.ADMIN_ID:
+        return
+    bank = db.get_casino_bank()
+    text = (
+        f"👑 <b>АДМИН-ПАНЕЛЬ AIMATOV SILVER</b>\n"
+        f"🏦 Банк казино: <b>{bank:,.2f} ASG</b>\n\n"
+        f"• <code>/give ID СУММА</code> — начислить / списать\n"
+        f"• <code>/setbal ID СУММА</code> — установить баланс\n"
+        f"• <code>/casino СУММА</code> — установить банк казино\n"
+        f"• <code>/ban ID</code> / <code>/unban ID</code> — бан (по AIMA-ID или TG ID)"
+    )
     await message.answer(text, parse_mode="HTML")
 
-@dp.message(Command("give"))
-async def cmd_give(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    parts = message.text.split()
-    if len(parts) < 3:
-        return await message.answer("Использование: <code>/give ID СУММА</code>", parse_mode="HTML")
-    target, amount = parts[1], float(parts[2])
-    if target.isdigit():
-        new_b = update_balance(int(target), amount, affect_casino=False)
-        if new_b < 0:
-            asyncio.create_task(send_debt_threat(bot, int(target), new_b))
-        await message.answer(f"✅ Баланс ID <code>{target}</code> изменен на {amount:,.2f}.\nТекущий баланс: <b>{new_b:,.2f} ASG</b>", parse_mode="HTML")
+@dp.message_handler(commands=['casino'])
+async def cmd_casino(message: types.Message):
+    if message.from_user.id != config.ADMIN_ID:
+        return
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("⚠️ Формат: <code>/casino СУММА</code>", parse_mode="HTML")
+        return
+    try:
+        amount = float(args[1])
+        db.set_casino_bank(amount)
+        await message.answer(f"🏛 Баланс Банка Казино успешно установлен на: <b>{amount:,.2f} ASG</b>", parse_mode="HTML")
+    except ValueError:
+        await message.answer("⚠️ Ошибка: введите число.")
 
-@dp.message(Command("setbal"))
-async def cmd_setbal(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    parts = message.text.split()
-    if len(parts) < 3:
-        return await message.answer("Использование: <code>/setbal ID СУММА</code>", parse_mode="HTML")
-    res = set_balance(parts[1], float(parts[2]))
-    if res:
-        if res[1] < 0:
-            target_id = int(parts[1]) if parts[1].isdigit() else 0
-            if target_id: asyncio.create_task(send_debt_threat(bot, target_id, res[1]))
-        await message.answer(f"✅ У игрока <b>{res[0]}</b> установлен баланс: <b>{res[1]:,.2f} ASG</b>", parse_mode="HTML")
+@dp.message_handler(commands=['give', 'setbal', 'set'])
+async def cmd_balance_ops(message: types.Message):
+    if message.from_user.id != config.ADMIN_ID:
+        return
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer("⚠️ Формат: <code>/give AIMA-ID СУММА</code> или <code>/setbal AIMA-ID СУММА</code>", parse_mode="HTML")
+        return
+        
+    cmd = args[0].lower()
+    target = args[1].strip()
+    try:
+        amount = float(args[2])
+    except ValueError:
+        await message.answer("⚠️ Сумма должна быть числом.")
+        return
 
-@dp.message(Command("casino"))
-async def cmd_casino_bal(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.answer("Использование: <code>/casino СУММА</code>", parse_mode="HTML")
-    res = set_balance(0, float(parts[1]))
-    await message.answer(f"🏛 Баланс <b>Банка Казино</b> успешно установлен на: <b>{res[1]:,.2f} ASG</b>", parse_mode="HTML")
+    mode = "give" if cmd == "/give" else "set"
+    ok = db.update_balance_by_target(target, amount, mode=mode)
+    if ok:
+        action_str = "изменен на" if mode == "give" else "установлен на"
+        await message.answer(f"✅ Баланс игрока <code>{target}</code> {action_str} <b>{amount:,.2f} ASG</b>", parse_mode="HTML")
+    else:
+        await message.answer(f"❌ Игрок с ID <code>{target}</code> не найден в базе.", parse_mode="HTML")
 
-@dp.message(Command("ban"))
-async def cmd_ban_user(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.answer("Использование: <code>/ban ID</code>", parse_mode="HTML")
-    res = set_ban(parts[1], 1)
-    if res:
-        await message.answer(f"🚫 Игрок <b>{res[0]}</b> заблокирован!", parse_mode="HTML")
+@dp.message_handler(commands=['ban', 'unban'])
+async def cmd_ban_ops(message: types.Message):
+    if message.from_user.id != config.ADMIN_ID:
+        return
+    args = message.text.split()
+    if len(args) != 2:
+        await message.answer("⚠️ Формат: <code>/ban ID</code>", parse_mode="HTML")
+        return
+    is_ban = (args[0].lower() == '/ban')
+    target = args[1].strip()
+    if db.set_ban_status(target, is_ban):
+        status = "заблокирован 🚫" if is_ban else "разблокирован ✅"
+        await message.answer(f"Игрок <code>{target}</code> {status}", parse_mode="HTML")
+    else:
+        await message.answer("❌ Игрок не найден.")
 
-@dp.message(Command("unban"))
-async def cmd_unban_user(message: Message):
-    if message.from_user.id != ADMIN_ID: return
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.answer("Использование: <code>/unban ID</code>", parse_mode="HTML")
-    res = set_ban(parts[1], 0)
-    if res:
-        await message.answer(f"✅ Игрок <b>{res[0]}</b> разблокирован!", parse_mode="HTML")
+# ================= FASTAPI СЕРВЕР ИГР =================
+
+class UserReq(BaseModel):
+    user_id: int
+    username: str = "Player"
+
+class BetReq(BaseModel):
+    user_id: int
+    bet: float
+    game: str  # 'slots', 'crash', 'dice'
+    choice: str = ""
+
+class ClickMineReq(BaseModel):
+    user_id: int
+    clicks: int
 
 @app.on_event("startup")
 async def on_startup():
-    init_db()
-    asyncio.create_task(dp.start_polling(bot))
+    db.init_db()
+    asyncio.create_task(dp.start_polling())
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+@app.get("/")
+async def root():
+    return {"status": "Aimatov Silver Casino Server Running"}
+
+@app.post("/api/user")
+async def api_user(req: UserReq):
+    p = db.get_or_create_player(req.user_id, req.username)
+    if p["is_banned"]:
+        raise HTTPException(status_code=403, detail="Аккаунт заблокирован")
+    now = int(time.time())
+    elapsed = min(max(0, now - p["last_collect"]), 43200)
+    pending_collector = math.floor(elapsed * (p["collector_level"] * 2.0))
+    return {
+        "aima_id": p["aima_id"],
+        "balance": p["balance"],
+        "collector_level": p["collector_level"],
+        "pending_collector": pending_collector,
+        "casino_bank": db.get_casino_bank()
+    }
+
+@app.post("/api/play")
+async def api_play(req: BetReq):
+    p = db.get_or_create_player(req.user_id)
+    if p["is_banned"]:
+        raise HTTPException(status_code=403, detail="Бан")
+    
+    bet = math.ceil(req.bet) # Округление ставки вверх в пользу казино
+    if bet <= 0 or bet > p["balance"]:
+        raise HTTPException(status_code=400, detail="Некорректная ставка")
+
+    casino_bank = db.get_casino_bank()
+    # Лимит выплаты: нельзя выиграть больше 3% от банка казино за раз (невозможно обанкротить)
+    max_allowed_payout = math.floor(casino_bank * 0.03)
+
+    roll = random.random()
+    multiplier = 0.0
+    details = {}
+
+    if req.game == "slots":
+        symbols = ["🍒", "🍋", "🔔", "💎", "7️⃣"]
+        # House Edge: 68% проигрыш, 22% мелкий возврат (Near-miss эффект), 8% выигрыш, 2% джекпот
+        if roll < 0.68:
+            # Генерируем "почти выиграл" (2 одинаковых символа из 3) для вызова азарта
+            s1 = random.choice(symbols)
+            s2 = s1 if random.random() < 0.65 else random.choice(symbols)
+            s3 = random.choice([x for x in symbols if x != s1])
+            details["reels"] = [s1, s2, s3]
+            multiplier = 0.0
+        elif roll < 0.90:
+            s = random.choice(["🍒", "🍋"])
+            details["reels"] = [s, s, "🔔"]
+            multiplier = 1.25
+        elif roll < 0.98:
+            s = random.choice(["🔔", "💎"])
+            details["reels"] = [s, s, s]
+            multiplier = 2.4
+        else:
+            details["reels"] = ["7️⃣", "7️⃣", "7️⃣"]
+            multiplier = 5.0
+
+    elif req.game == "dice":
+        # Игра Больше/Меньше (шанс победы 34%, множитель 2.1x)
+        is_win = roll < 0.34
+        dice_num = random.randint(4, 6) if (is_win and req.choice == "high") or (not is_win and req.choice == "low") else random.randint(1, 3)
+        details["dice"] = dice_num
+        multiplier = 2.1 if is_win else 0.0
+
+    elif req.game == "crash":
+        # Ракета/Краш: 32% мгновенный слив на 1.00x, иначе осторожный икс
+        target = float(req.choice) if req.choice else 2.0
+        target = max(1.1, min(target, 10.0))
+        # Реальный шанс пробить икс занижен на 15% в пользу казино
+        win_prob = (0.85 / target)
+        if roll < win_prob:
+            crash_point = round(target + random.uniform(0.05, 1.2), 2)
+            multiplier = target
+        else:
+            crash_point = round(random.uniform(1.00, max(1.01, target - 0.05)), 2)
+            multiplier = 0.0
+        details["crash_point"] = crash_point
+
+    # Округление выигрыша строго ВНИЗ в пользу казино
+    raw_win = math.floor(bet * multiplier)
+    win_amount = min(raw_win, max_allowed_payout) if raw_win > 0 else 0
+
+    net_change = win_amount - bet
+    new_balance = db.adjust_player_balance(req.user_id, net_change)
+    db.update_casino_bank(-net_change) # Проигрыш идет в банк казино, выигрыш списывается
+
+    return {
+        "win": win_amount,
+        "multiplier": round(multiplier, 2),
+        "balance": new_balance,
+        "details": details
+    }
+
+@app.post("/api/mine_click")
+async def api_mine_click(req: ClickMineReq):
+    clicks = max(1, min(req.clicks, 50))
+    raw_mined = clicks * 5.0  # 5 ASG за клик
+    
+    # Налог 10-30% в пользу казино с округлением налога ВВЕРХ
+    tax_rate = random.uniform(0.10, 0.30)
+    tax = math.ceil(raw_mined * tax_rate)
+    net_profit = math.floor(raw_mined - tax)
+    
+    new_bal = db.adjust_player_balance(req.user_id, net_profit)
+    db.update_casino_bank(tax)
+    
+    return {
+        "net": net_profit,
+        "tax": tax,
+        "tax_percent": int(round(tax_rate * 100)),
+        "balance": new_bal
+    }
+
+@app.post("/api/collector_claim")
+async def api_collector_claim(req: UserReq):
+    res = db.collect_passive_income(req.user_id)
+    if not res or "error" in res:
+        raise HTTPException(status_code=400, detail=res.get("error", "Ошибка сбора"))
+    return res
+
+@app.post("/api/collector_upgrade")
+async def api_collector_upgrade(req: UserReq):
+    res = db.upgrade_collector(req.user_id)
+    if "error" in res:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
