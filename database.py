@@ -24,7 +24,7 @@ def init_db():
         )
     """)
     
-    # Создаем аккаунт самого КАЗИНО (ID = 0) с резервом 100 млн
+    # Креирање на Банката на Казиното (ID = 0)
     cursor.execute("""
         INSERT INTO players (user_id, username, balance, aima_id, banned)
         VALUES (0, '🏛 Aimatov Casino (Банк)', 100000000.0, 'AIMA-0000-0000-BANK-RESERVE', 0)
@@ -67,7 +67,6 @@ def update_balance(user_id, amount, affect_casino=False):
     cursor = conn.cursor()
     cursor.execute("UPDATE players SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
     
-    # Если это ставка в игре: проигрыш игрока идет в банк казино, выигрыш — списывается с банка казино
     if affect_casino and user_id != 0:
         cursor.execute("UPDATE players SET balance = balance - %s WHERE user_id = 0", (amount,))
         
@@ -106,7 +105,7 @@ def set_ban(target, ban_status):
 
 def transfer_money(sender_id, target_str, amount):
     if amount <= 0:
-        return {"error": "Сумма должна быть больше 0"}
+        return {"error": "Сумата мора да биде поголема од 0"}
     conn = get_conn()
     cursor = conn.cursor()
     
@@ -114,13 +113,13 @@ def transfer_money(sender_id, target_str, amount):
     sender = cursor.fetchone()
     if not sender:
         cursor.close(); conn.close()
-        return {"error": "Отправитель не найден"}
+        return {"error": "Испраќачот не е пронајден"}
     if sender[1] == 1:
         cursor.close(); conn.close()
-        return {"error": "Ваш аккаунт заблокирован"}
+        return {"error": "Вашиот профил е блокиран"}
     if sender[0] < amount:
         cursor.close(); conn.close()
-        return {"error": "Недостаточно средств"}
+        return {"error": "Немате доволно средства"}
 
     target_clean = str(target_str).strip()
     if target_clean.isdigit():
@@ -131,12 +130,12 @@ def transfer_money(sender_id, target_str, amount):
     recipient = cursor.fetchone()
     if not recipient:
         cursor.close(); conn.close()
-        return {"error": "Получатель не найден в базе"}
+        return {"error": "Примачот не е пронајден во базата"}
         
     rec_id, rec_name = recipient[0], recipient[1]
     if rec_id == sender_id:
         cursor.close(); conn.close()
-        return {"error": "Нельзя перевести самому себе"}
+        return {"error": "Не можете да си префртите пари на самите себе"}
 
     cursor.execute("UPDATE players SET balance = balance - %s WHERE user_id = %s", (amount, sender_id))
     cursor.execute("UPDATE players SET balance = balance + %s WHERE user_id = %s", (amount, rec_id))
@@ -151,7 +150,6 @@ def transfer_money(sender_id, target_str, amount):
 def get_all_leaderboard():
     conn = get_conn()
     cursor = conn.cursor()
-    # Берем абсолютно всех игроков + само казино (ID=0), сортируем по балансу
     cursor.execute("SELECT user_id, username, balance, aima_id, banned FROM players ORDER BY balance DESC")
     rows = cursor.fetchall()
     cursor.close()
