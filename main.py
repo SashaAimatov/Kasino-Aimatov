@@ -3,7 +3,7 @@ import math
 import random
 import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import telebot
@@ -12,7 +12,6 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 import config
 import database as db
 
-# Современный запуск бота в фоновом потоке при старте сервера
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
@@ -61,10 +60,8 @@ def cmd_admin(message):
     text = (
         f"👑 <b>АДМИН-ПАНЕЛЬ AIMATOV SILVER</b>\n"
         f"🏦 Банк казино: <b>{bank:,.2f} ASG</b>\n\n"
-        f"• <code>/give ID СУММА</code> — начислить / списать\n"
-        f"• <code>/setbal ID СУММА</code> — установить баланс\n"
-        f"• <code>/casino СУММА</code> — установить банк казино\n"
-        f"• <code>/ban ID</code> / <code>/unban ID</code> — блокировка"
+        f"• <code>/give ID СУММА</code> — начислить\n"
+        f"• <code>/casino СУММА</code> — банк казино"
     )
     bot.send_message(message.chat.id, text)
 
@@ -78,29 +75,16 @@ def cmd_casino(message):
         db.set_casino_bank(amount)
         bot.send_message(message.chat.id, f"🏛 Банк Казино установлен на: <b>{amount:,.2f} ASG</b>")
 
-@bot.message_handler(commands=['give', 'setbal', 'set'])
+@bot.message_handler(commands=['give', 'setbal'])
 def cmd_balance(message):
     if message.from_user.id != config.ADMIN_ID:
         return
     args = message.text.split()
     if len(args) != 3:
-        bot.send_message(message.chat.id, "⚠️ Формат: <code>/give ID СУММА</code>")
         return
     mode = "give" if args[0] == "/give" else "set"
-    if db.update_balance_by_target(args[1].strip(), float(args[2]), mode=mode):
-        bot.send_message(message.chat.id, f"✅ Баланс <code>{args[1]}</code> обновлен на <b>{float(args[2]):,.2f} ASG</b>")
-    else:
-        bot.send_message(message.chat.id, "❌ Игрок не найден.")
-
-@bot.message_handler(commands=['ban', 'unban'])
-def cmd_ban(message):
-    if message.from_user.id != config.ADMIN_ID:
-        return
-    args = message.text.split()
-    if len(args) == 2:
-        is_ban = (args[0] == '/ban')
-        db.set_ban_status(args[1].strip(), is_ban)
-        bot.send_message(message.chat.id, f"✅ Статус бана для <code>{args[1]}</code> обновлен.")
+    db.update_balance_by_target(args[1].strip(), float(args[2]), mode=mode)
+    bot.send_message(message.chat.id, f"✅ Баланс обновлен.")
 
 class UserReq(BaseModel):
     user_id: int
