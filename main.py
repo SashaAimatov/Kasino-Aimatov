@@ -126,7 +126,6 @@ def api_play_game(game: str, req: PlayRequest):
         return {"error": "Неизвестная игра"}
 
     profit = win_amount - bet
-    # affect_casino=True: если ты выиграл, деньги списываются у Казино (ID=0). Если проиграл — идут в банк Казино!
     new_bal = update_balance(req.user_id, profit, affect_casino=True)
     
     return {
@@ -136,9 +135,12 @@ def api_play_game(game: str, req: PlayRequest):
         "details": details
     }
 
-# --- НАСТРОЙКА TELEGRAM BOT И АДМИН-ПАНЕЛИ ---
+# --- TELEGRAM BOT И НАСТРОЙКА АДМИНКИ ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Твой персональный Telegram ID (доступ только у тебя)
+ADMIN_ID = 5399819309
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -151,84 +153,81 @@ async def cmd_start(message: Message):
         f"🏛 <b>Aimatov Silver Group</b>\n\n"
         f"👤 Игрок: <b>{uname}</b>\n"
         f"💳 Ваш AIMA-ID: <code>{p['aima_id']}</code>\n"
-        f"💰 Баланс: <b>{p['balance']:,.2f} $AIMA</b>\n\n"
-        f"Для вызова панели управления введите /admin",
+        f"💰 Баланс: <b>{p['balance']:,.2f} ASG</b>",
         reply_markup=kb,
         parse_mode="HTML"
     )
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ У вас нет доступа к этой команде.")
+        
     leaders = get_all_leaderboard()
     text = (
         "👑 <b>АДМИН-ПАНЕЛЬ AIMATOV SILVER</b>\n\n"
         "<b>Команды управления:</b>\n"
-        "• <code>/give ID СУММА</code> — начислить/списать (можно с минусом)\n"
-        "• <code>/setbal ID СУММА</code> — установить точный баланс\n"
+        "• <code>/give ID СУММА</code> — начислить/списать\n"
+        "• <code>/setbal ID СУММА</code> — установить баланс\n"
         "• <code>/casino СУММА</code> — установить баланс Банка Казино\n"
-        "• <code>/ban ID</code> — заблокировать игрока\n"
-        "• <code>/unban ID</code> — разблокировать игрока\n\n"
-        "<i>Вместо ID можно писать Telegram ID, AIMA-ID или ник!</i>\n\n"
+        "• <code>/ban ID</code> / <code>/unban ID</code> — бан/разбан\n\n"
         "📊 <b>Все участники в базе:</b>\n"
     )
     for i, u in enumerate(leaders, 1):
         status = "🚫" if u["banned"] else ("🏛" if u["is_casino"] else "👤")
-        text += f"{i}. {status} <b>{u['username']}</b> (ID: <code>{u['user_id']}</code>) — {u['balance']:,.2f} $\n"
+        text += f"{i}. {status} <b>{u['username']}</b> (ID: <code>{u['user_id']}</code>) — {u['balance']:,.2f} ASG\n"
         
     await message.answer(text, parse_mode="HTML")
 
 @dp.message(Command("give"))
 async def cmd_give(message: Message):
+    if message.from_user.id != ADMIN_ID: return
     parts = message.text.split()
     if len(parts) < 3:
         return await message.answer("Использование: <code>/give ID СУММА</code>", parse_mode="HTML")
     target, amount = parts[1], float(parts[2])
     if target.isdigit():
         new_b = update_balance(int(target), amount, affect_casino=False)
-        await message.answer(f"✅ Баланс ID <code>{target}</code> изменен на {amount:,.2f}.\nТекущий: <b>{new_b:,.2f} $AIMA</b>", parse_mode="HTML")
-    else:
-        await message.answer("Укажите числовой ID игрока (посмотреть можно в /admin)")
+        await message.answer(f"✅ Баланс ID <code>{target}</code> изменен на {amount:,.2f}.\nТекущий: <b>{new_b:,.2f} ASG</b>", parse_mode="HTML")
 
 @dp.message(Command("setbal"))
 async def cmd_setbal(message: Message):
+    if message.from_user.id != ADMIN_ID: return
     parts = message.text.split()
     if len(parts) < 3:
         return await message.answer("Использование: <code>/setbal ID СУММА</code>", parse_mode="HTML")
     res = set_balance(parts[1], float(parts[2]))
     if res:
-        await message.answer(f"✅ Для <b>{res[0]}</b> установлен баланс: <b>{res[1]:,.2f} $AIMA</b>", parse_mode="HTML")
-    else:
-        await message.answer("❌ Игрок не найден.")
+        await message.answer(f"✅ Для <b>{res[0]}</b> установлен баланс: <b>{res[1]:,.2f} ASG</b>", parse_mode="HTML")
 
 @dp.message(Command("casino"))
 async def cmd_casino_bal(message: Message):
+    if message.from_user.id != ADMIN_ID: return
     parts = message.text.split()
     if len(parts) < 2:
         return await message.answer("Использование: <code>/casino СУММА</code>", parse_mode="HTML")
     res = set_balance(0, float(parts[1]))
-    await message.answer(f"🏛 Баланс <b>Банка Казино</b> установлен на: <b>{res[1]:,.2f} $AIMA</b>", parse_mode="HTML")
+    await message.answer(f"🏛 Баланс <b>Банка Казино</b> установлен на: <b>{res[1]:,.2f} ASG</b>", parse_mode="HTML")
 
 @dp.message(Command("ban"))
 async def cmd_ban_user(message: Message):
+    if message.from_user.id != ADMIN_ID: return
     parts = message.text.split()
     if len(parts) < 2:
         return await message.answer("Использование: <code>/ban ID</code>", parse_mode="HTML")
     res = set_ban(parts[1], 1)
     if res:
         await message.answer(f"🚫 Игрок <b>{res[0]}</b> заблокирован!", parse_mode="HTML")
-    else:
-        await message.answer("❌ Игрок не найден.")
 
 @dp.message(Command("unban"))
 async def cmd_unban_user(message: Message):
+    if message.from_user.id != ADMIN_ID: return
     parts = message.text.split()
     if len(parts) < 2:
         return await message.answer("Использование: <code>/unban ID</code>", parse_mode="HTML")
     res = set_ban(parts[1], 0)
     if res:
         await message.answer(f"✅ Игрок <b>{res[0]}</b> разблокирован!", parse_mode="HTML")
-    else:
-        await message.answer("❌ Игрок не найден.")
 
 @app.on_event("startup")
 async def on_startup():
