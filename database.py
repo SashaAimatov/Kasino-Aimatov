@@ -1,168 +1,198 @@
 import psycopg2
-from config import DATABASE_URL
+from psycopg2.extras import RealDictCursor
+import random
+import time
+import math
+import config
 
 def get_conn():
-    return psycopg2.connect(DATABASE_URL.strip())
-
-def make_aima_id(id_val):
-    if id_val == 0:
-        return "AIMA-0000-0000-BANK-RESERVE"
-    s = str(id_val).zfill(8) if len(str(id_val)) <= 8 else str(id_val)
-    s_clean = s[-8:].zfill(8)
-    return f"AIMA-{s_clean[:4]}-{s_clean[4:]}-8492-1049"
+    return psycopg2.connect(config.DATABASE_URL, cursor_factory=RealDictCursor)
 
 def init_db():
     conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute("""
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS players (
             user_id BIGINT PRIMARY KEY,
             username TEXT,
-            balance DOUBLE PRECISION DEFAULT 500000.0,
-            aima_id TEXT,
-            banned INTEGER DEFAULT 0
-        )
+            aima_id TEXT UNIQUE,
+            balance DOUBLE PRECISION DEFAULT 1000.0,
+            collector_level INT DEFAULT 1,
+            last_collect BIGINT DEFAULT 0,
+            is_banned BOOLEAN DEFAULT FALSE
+        );
     """)
-    
-    # Создание аккаунта Банка Казино (ID = 0)
-    cursor.execute("""
-        INSERT INTO players (user_id, username, balance, aima_id, banned)
-        VALUES (0, '🏛 Aimatov Casino (Банк)', 100000000.0, 'AIMA-0000-0000-BANK-RESERVE', 0)
-        ON CONFLICT (user_id) DO NOTHING
+    # Игрок с user_id = 0 — это Банк Казино
+    cur.execute("""
+        INSERT INTO players (user_id, username, aima_id, balance)
+        VALUES (0, 'CASINO_BANK', 'AIMA-0000-0000-0000-0000', 1000000000.0)
+        ON CONFLICT (user_id) DO NOTHING;
     """)
     conn.commit()
-    cursor.close()
+    cur.close()
     conn.close()
 
-def get_player(user_id, username=None):
+def generate_aima_id():
+    parts = [f"{random.randint(1000, 9999)}" for _ in range(4)]
+    return "AIMA-" + "-".join(parts)
+
+def get_or_create_player(user_id: int, username: str = "Player"):
     conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute("SELECT username, balance, aima_id, banned FROM players WHERE user_id = %s", (user_id,))
-    row = cursor.fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM players WHERE user_id = %s", (user_id,))
+    player = cur.fetchone()
     
-    if not row:
-        uname = username if username else f"Player_{str(user_id)[-4:]}"
-        aima_id = make_aima_id(user_id)
-        cursor.execute(
-            "INSERT INTO players (user_id, username, balance, aima_id) VALUES (%s, %s, 500000.0, %s)", 
-            (user_id, uname, aima_id)
-        )
+    if not player:
+        aima_id = generate_aima_id()
+        now = int(time.time())
+        cur.execute("""
+            INSERT INTO players (user_id, username, aima_id, balance, collector_level, last_collect)
+            VALUES (%s, %s, %s, 1000.0, 1, %s)
+            RETURNING *;
+        """, (user_id, username, aima_id, now))
+        player = cur.fetchone()
         conn.commit()
-        balance, banned = 500000.0, 0
-    else:
-        db_uname, balance, aima_id, banned = row[0], row[1], row[2], row[3]
-        if username and username != "Player" and username != db_uname:
-            cursor.execute("UPDATE players SET username = %s WHERE user_id = %s", (username, user_id))
-            conn.commit()
-            uname = username
-        else:
-            uname = db_uname
-            
-    cursor.close()
-    conn.close()
-    return {"id": user_id, "username": uname, "balance": float(balance), "aima_id": aima_id, "banned": banned}
-
-def update_balance(user_id, amount, affect_casino=False):
-    conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE players SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
-    
-    if affect_casino and user_id != 0:
-        cursor.execute("UPDATE players SET balance = balance - %s WHERE user_id = 0", (amount,))
         
-    conn.commit()
-    cursor.execute("SELECT balance FROM players WHERE user_id = %s", (user_id,))
-    new_bal = cursor.fetchone()[0]
-    cursor.close()
+    cur.close()
     conn.close()
-    return float(new_bal)
+    return player
 
-def set_balance(target, amount):
+def get_casino_bank() -> float:
     conn = get_conn()
-    cursor = conn.cursor()
-    if str(target).isdigit():
-        cursor.execute("UPDATE players SET balance = %s WHERE user_id = %s RETURNING username, balance", (amount, int(target)))
-    else:
-        cursor.execute("UPDATE players SET balance = %s WHERE aima_id = %s OR username = %s RETURNING username, balance", (amount, target, target.lstrip('@')))
-    row = cursor.fetchone()
-    conn.commit()
-    cursor.close()
+    cur = conn.cursor()
+    cur.execute("SELECT balance FROM players WHERE user_id = 0")
+    row = cur.fetchone()
+    cur.close()
     conn.close()
-    return row
+    return row["balance"] if row else 1000000.0
 
-def set_ban(target, ban_status):
+def update_casino_bank(delta: float):
     conn = get_conn()
-    cursor = conn.cursor()
-    if str(target).isdigit():
-        cursor.execute("UPDATE players SET banned = %s WHERE user_id = %s RETURNING username", (ban_status, int(target)))
-    else:
-        cursor.execute("UPDATE players SET banned = %s WHERE aima_id = %s OR username = %s RETURNING username", (ban_status, target, target.lstrip('@')))
-    row = cursor.fetchone()
+    cur = conn.cursor()
+    cur.execute("UPDATE players SET balance = balance + %s WHERE user_id = 0", (delta,))
     conn.commit()
-    cursor.close()
+    cur.close()
     conn.close()
-    return row
 
-def transfer_money(sender_id, target_str, amount):
-    if amount <= 0:
-        return {"error": "Сумма должна быть больше 0"}
+def set_casino_bank(amount: float):
     conn = get_conn()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT balance, banned FROM players WHERE user_id = %s", (sender_id,))
-    sender = cursor.fetchone()
-    if not sender:
-        cursor.close(); conn.close()
-        return {"error": "Отправитель не найден"}
-    if sender[1] == 1:
-        cursor.close(); conn.close()
-        return {"error": "Ваш аккаунт заблокирован"}
-    if sender[0] < amount:
-        cursor.close(); conn.close()
-        return {"error": "Недостаточно средств на балансе"}
+    cur = conn.cursor()
+    cur.execute("UPDATE players SET balance = %s WHERE user_id = 0", (amount,))
+    conn.commit()
+    cur.close()
+    conn.close()
 
-    target_clean = str(target_str).strip()
-    if target_clean.isdigit():
-        cursor.execute("SELECT user_id, username FROM players WHERE user_id = %s", (int(target_clean),))
+def update_balance_by_target(target: str, amount: float, mode: str = "give") -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    # Поиск либо по AIMA-ID, либо по Telegram ID
+    if target.startswith("AIMA-"):
+        op = "balance + %s" if mode == "give" else "%s"
+        cur.execute(f"UPDATE players SET balance = {op} WHERE aima_id = %s RETURNING user_id", (amount, target))
     else:
-        cursor.execute("SELECT user_id, username FROM players WHERE aima_id = %s OR LOWER(username) = LOWER(%s)", (target_clean, target_clean.lstrip('@')))
+        op = "balance + %s" if mode == "give" else "%s"
+        cur.execute(f"UPDATE players SET balance = {op} WHERE user_id = %s RETURNING user_id", (amount, int(target)))
         
-    recipient = cursor.fetchone()
-    if not recipient:
-        cursor.close(); conn.close()
-        return {"error": "Получатель не найден в базе"}
-        
-    rec_id, rec_name = recipient[0], recipient[1]
-    if rec_id == sender_id:
-        cursor.close(); conn.close()
-        return {"error": "Нельзя переводить средства самому себе"}
-
-    cursor.execute("UPDATE players SET balance = balance - %s WHERE user_id = %s", (amount, sender_id))
-    cursor.execute("UPDATE players SET balance = balance + %s WHERE user_id = %s", (amount, rec_id))
+    updated = cur.fetchone()
     conn.commit()
-    
-    cursor.execute("SELECT balance FROM players WHERE user_id = %s", (sender_id,))
-    new_bal = cursor.fetchone()[0]
-    cursor.close()
+    cur.close()
     conn.close()
-    return {"status": "ok", "new_balance": float(new_bal), "recipient": rec_name}
+    return bool(updated)
 
-def get_all_leaderboard():
+def set_ban_status(target: str, is_banned: bool) -> bool:
     conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, balance, aima_id, banned FROM players ORDER BY balance DESC")
-    rows = cursor.fetchall()
-    cursor.close()
+    cur = conn.cursor()
+    if target.startswith("AIMA-"):
+        cur.execute("UPDATE players SET is_banned = %s WHERE aima_id = %s RETURNING user_id", (is_banned, target))
+    else:
+        cur.execute("UPDATE players SET is_banned = %s WHERE user_id = %s RETURNING user_id", (is_banned, int(target)))
+    updated = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return bool(updated)
+
+def adjust_player_balance(user_id: int, delta: float) -> float:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE players 
+        SET balance = FLOOR((balance + %s) * 100) / 100 
+        WHERE user_id = %s 
+        RETURNING balance
+    """, (delta, user_id))
+    res = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return res["balance"] if res else 0.0
+
+def collect_passive_income(user_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM players WHERE user_id = %s", (user_id,))
+    p = cur.fetchone()
+    if not p:
+        cur.close()
+        conn.close()
+        return None
+        
+    now = int(time.time())
+    elapsed = max(0, now - p["last_collect"])
+    # Ограничение накопления: максимум за 12 часов (43200 сек), 2 ASG/сек за уровень
+    elapsed = min(elapsed, 43200)
+    raw_collected = elapsed * (p["collector_level"] * 2.0)
+    
+    if raw_collected < 10:
+        cur.close()
+        conn.close()
+        return {"error": "Слишком мало накоплено (минимум 10 ASG)"}
+        
+    # Налог коллектора 10-30% в пользу казино (округление вверх)
+    tax_rate = random.uniform(0.10, 0.30)
+    tax = math.ceil(raw_collected * tax_rate)
+    net = math.floor(raw_collected - tax)
+    
+    cur.execute("""
+        UPDATE players 
+        SET balance = balance + %s, last_collect = %s 
+        WHERE user_id = %s RETURNING balance
+    """, (net, now, user_id))
+    new_bal = cur.fetchone()["balance"]
+    
+    cur.execute("UPDATE players SET balance = balance + %s WHERE user_id = 0", (tax,))
+    conn.commit()
+    cur.close()
     conn.close()
     
-    result = []
-    for r in rows:
-        result.append({
-            "user_id": r[0],
-            "username": r[1] if r[1] else f"Player_{str(r[0])[-4:]}",
-            "balance": float(r[2]),
-            "aima_id": r[3],
-            "is_casino": (r[0] == 0),
-            "banned": r[4]
-        })
-    return result
+    return {
+        "net": net,
+        "tax": tax,
+        "tax_percent": int(round(tax_rate * 100)),
+        "balance": new_bal
+    }
+
+def upgrade_collector(user_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT balance, collector_level FROM players WHERE user_id = %s", (user_id,))
+    p = cur.fetchone()
+    cost = p["collector_level"] * 5000
+    
+    if p["balance"] < cost:
+        cur.close()
+        conn.close()
+        return {"error": f"Недостаточно средств. Нужно {cost} ASG"}
+        
+    cur.execute("""
+        UPDATE players 
+        SET balance = balance - %s, collector_level = collector_level + 1 
+        WHERE user_id = %s 
+        RETURNING balance, collector_level
+    """, (cost, user_id))
+    updated = cur.fetchone()
+    cur.execute("UPDATE players SET balance = balance + %s WHERE user_id = 0", (cost,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"balance": updated["balance"], "level": updated["collector_level"], "cost": cost}
