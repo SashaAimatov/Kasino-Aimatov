@@ -1,7 +1,7 @@
 import os
 
 # Токен твоего Telegram-бота от @BotFather
-BOT_TOKEN = ""
+BOT_TOKEN = "9275994707:AAF7QEX8yPJhW1lGg8aZKgNo5Z3PbQG9Idk"
 
 # Ссылка на Mini App (GitHub Pages)
 WEBAPP_URL = "https://sashaimatov.github.io/Kasino-Aimatov/"
