@@ -2,7 +2,6 @@ import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
@@ -26,12 +25,23 @@ app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
 bot = telebot.TeleBot(config.BOT_TOKEN, parse_mode="HTML")
+
+def format_forbes():
+    rows = db.get_forbes_list(50)
+    return [
+        {
+            "username": str(r["username"] or "Игрок"),
+            "aima_id": str(r["aima_id"]),
+            "balance": int(r["balance"])
+        }
+        for r in rows
+    ]
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
@@ -60,7 +70,7 @@ def cmd_balance(message):
         return
     args = message.text.split()
     if len(args) != 3:
-        bot.send_message(message.chat.id, "⚠️ Формат: <code>/setbal AIMA-ID_ИЛИ_TG_ID СУММА</code>")
+        bot.send_message(message.chat.id, "⚠️ Формат: <code>/setbal ID СУММА</code>")
         return
     if db.update_balance_by_target(args[1].strip(), float(args[2]), mode="set"):
         bot.send_message(message.chat.id, f"✅ Баланс <code>{args[1]}</code> установлен на <b>{int(float(args[2])):,} ASG</b>")
@@ -72,10 +82,9 @@ def cmd_give(message):
     if message.from_user.id != config.ADMIN_ID:
         return
     args = message.text.split()
-    if len(args) != 3:
-        return
-    db.update_balance_by_target(args[1].strip(), float(args[2]), mode="give")
-    bot.send_message(message.chat.id, f"✅ Баланс пополнен.")
+    if len(args) == 3:
+        db.update_balance_by_target(args[1].strip(), float(args[2]), mode="give")
+        bot.send_message(message.chat.id, "✅ Баланс обновлен.")
 
 @bot.message_handler(commands=['casino'])
 def cmd_casino(message):
@@ -93,6 +102,7 @@ class UserReq(BaseModel):
 
 class SyncReq(BaseModel):
     user_id: int
+    username: str = "Player"
     balance_delta: int
     bank_delta: int
 
@@ -107,7 +117,7 @@ class RaidReq(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "Aimatov Silver Group Server OK"}
+    return {"status": "ok"}
 
 @app.post("/api/user")
 def api_user(req: UserReq):
@@ -115,38 +125,27 @@ def api_user(req: UserReq):
     return {
         "aima_id": p["aima_id"],
         "balance": int(p["balance"]),
-        "casino_bank": int(db.get_casino_bank())
+        "casino_bank": int(db.get_casino_bank()),
+        "forbes": format_forbes()
     }
 
 @app.post("/api/sync")
 def api_sync(req: SyncReq):
+    db.get_or_create_player(req.user_id, req.username)
     res = db.sync_player_delta(req.user_id, req.balance_delta, req.bank_delta)
     return {
         "balance": int(res["balance"]) if res else 0,
-        "casino_bank": int(db.get_casino_bank())
+        "casino_bank": int(db.get_casino_bank()),
+        "forbes": format_forbes()
     }
 
 @app.get("/api/forbes")
+@app.post("/api/forbes")
 def api_forbes():
-    rows = db.get_forbes_list(50)
-    data = {
+    return {
         "casino_bank": int(db.get_casino_bank()),
-        "leaders": [
-            {
-                "username": str(r["username"] or "Игрок"),
-                "aima_id": str(r["aima_id"]),
-                "balance": int(r["balance"])
-            }
-            for r in rows
-        ]
+        "leaders": format_forbes()
     }
-    return JSONResponse(
-        content=data,
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-cache, no-store, must-revalidate"
-        }
-    )
 
 @app.post("/api/transfer")
 def api_transfer(req: TransferReq):
