@@ -1,8 +1,6 @@
 import threading
-import math
-import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import telebot
@@ -11,12 +9,18 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 import config
 import database as db
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
-    bot_thread = threading.Thread(target=bot.infinity_polling, kwargs={"skip_pending": True}, daemon=True)
+    bot_thread = threading.Thread(
+        target=bot.infinity_polling,
+        kwargs={"skip_pending": True},
+        daemon=True
+    )
     bot_thread.start()
     yield
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -29,6 +33,7 @@ app.add_middleware(
 )
 
 bot = telebot.TeleBot(config.BOT_TOKEN, parse_mode="HTML")
+
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
@@ -51,6 +56,7 @@ def cmd_start(message):
     )
     bot.send_message(message.chat.id, text, reply_markup=markup)
 
+
 @bot.message_handler(commands=['admin'])
 def cmd_admin(message):
     if message.from_user.id != config.ADMIN_ID:
@@ -66,6 +72,7 @@ def cmd_admin(message):
     )
     bot.send_message(message.chat.id, text)
 
+
 @bot.message_handler(commands=['casino'])
 def cmd_casino(message):
     if message.from_user.id != config.ADMIN_ID:
@@ -75,6 +82,7 @@ def cmd_casino(message):
         amount = int(float(args[1]))
         db.set_casino_bank(amount)
         bot.send_message(message.chat.id, f"🏛 Банк Казино установлен на: <b>{amount:,} ASG</b>")
+
 
 @bot.message_handler(commands=['give', 'setbal', 'set'])
 def cmd_balance(message):
@@ -90,6 +98,7 @@ def cmd_balance(message):
     else:
         bot.send_message(message.chat.id, "❌ Игрок не найден.")
 
+
 @bot.message_handler(commands=['ban', 'unban'])
 def cmd_ban(message):
     if message.from_user.id != config.ADMIN_ID:
@@ -100,33 +109,46 @@ def cmd_ban(message):
         db.set_ban_status(args[1].strip(), is_ban)
         bot.send_message(message.chat.id, f"✅ Статус блокировки <code>{args[1]}</code> изменен.")
 
+
 class UserReq(BaseModel):
     user_id: int
     username: str = "Player"
+    current_balance: int | None = None
+
 
 class SyncReq(BaseModel):
     user_id: int
     balance_delta: int
     bank_delta: int
 
+
 class TransferReq(BaseModel):
     user_id: int
     target_aima: str
     amount: int
 
+
 class RaidReq(BaseModel):
     user_id: int
     target_aima: str = ""
 
+
 @app.get("/")
 def root():
     return {"status": "Aimatov Silver Group Server OK"}
+
 
 @app.post("/api/user")
 def api_user(req: UserReq):
     p = db.get_or_create_player(req.user_id, req.username)
     if p["is_banned"]:
         raise HTTPException(status_code=403, detail="Аккаунт заблокирован")
+
+    # Если игрок играл локально, пока сервер просыпался, синхронизируем актуальный баланс
+    if req.current_balance is not None and req.current_balance >= 0:
+        db.update_balance_by_target(str(req.user_id), float(req.current_balance), mode="set")
+        p = db.get_or_create_player(req.user_id, req.username)
+
     return {
         "aima_id": p["aima_id"],
         "balance": int(p["balance"]),
@@ -135,22 +157,27 @@ def api_user(req: UserReq):
         "casino_bank": db.get_casino_bank()
     }
 
+
 @app.post("/api/sync")
 def api_sync(req: SyncReq):
+    db.get_or_create_player(req.user_id)
     res = db.sync_player_delta(req.user_id, req.balance_delta, req.bank_delta)
     return {
         "balance": int(res["balance"]) if res else 0,
         "casino_bank": db.get_casino_bank()
     }
 
+
 @app.get("/api/forbes")
-def api_forbes():
-    rows = db.get_forbes_list(25)
+def api_forbes(response: Response):
+    # Отключаем кэширование, чтобы всегда отдавался свежий список всех игроков из PostgreSQL
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    rows = db.get_forbes_list(50)
     return {
         "casino_bank": db.get_casino_bank(),
         "leaders": [
             {
-                "username": r["username"] or "Аноним",
+                "username": r["username"] if r["username"] else "Игрок",
                 "aima_id": r["aima_id"],
                 "balance": int(r["balance"]),
                 "collector_level": r["collector_level"]
@@ -159,12 +186,14 @@ def api_forbes():
         ]
     }
 
+
 @app.post("/api/transfer")
 def api_transfer(req: TransferReq):
     res = db.transfer_asg(req.user_id, req.target_aima, req.amount)
     if "error" in res:
         raise HTTPException(status_code=400, detail=res["error"])
     return res
+
 
 @app.post("/api/collector_raid")
 def api_collector_raid(req: RaidReq):
