@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -64,6 +65,11 @@ def run(fn, user, *args, own=True):
             return fn(cur, uid, *args)
     except db.GameError as e:
         raise HTTPException(400, str(e))
+    except Exception as e:
+        # HTTPException проходит через CORS-middleware, а "голая" ошибка 500 нет:
+        # браузер тогда пишет "нет связи". Так мы увидим настоящую причину.
+        logging.exception("api error")
+        raise HTTPException(500, f"Ошибка сервера: {type(e).__name__}: {e}"[:300])
 
 
 # ================= API =================
@@ -115,10 +121,20 @@ def api_user(u=Depends(current_user)):
     return run(_user, u)
 
 
+@app.get("/health")
+def health():
+    """Открой в браузере: покажет, живо ли подключение к базе."""
+    def check(cur, uid):
+        cur.execute("SELECT COUNT(*) AS n FROM players")
+        return {"db": "ok", "players": cur.fetchone()["n"]}
+    return run(check, (0, ""), own=False)
+
+
 @app.get("/api/forbes")
 def api_forbes():
-    with db.tx() as cur:
+    def top(cur, uid):
         return {"casino_bank": db.bank(cur), "leaders": db.get_forbes(cur)}
+    return run(top, (0, ""), own=False)
 
 
 @app.post("/api/play")
