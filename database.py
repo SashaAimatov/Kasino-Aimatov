@@ -49,6 +49,11 @@ def init_db():
         cur.execute("ALTER TABLE players ALTER COLUMN balance DROP DEFAULT")
         cur.execute("ALTER TABLE players ALTER COLUMN balance TYPE BIGINT USING ROUND(balance)::BIGINT")
         cur.execute("ALTER TABLE players ALTER COLUMN balance SET DEFAULT 500000")
+        # колонки, которых может не быть в старой таблице
+        cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS username TEXT")
+        cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS aima_id TEXT")
+        cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE")
+        cur.execute("UPDATE players SET is_banned=FALSE WHERE is_banned IS NULL")
         cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS last_mint BIGINT DEFAULT 0")
         cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS last_raid BIGINT DEFAULT 0")
         cur.execute("""
