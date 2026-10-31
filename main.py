@@ -169,7 +169,7 @@ def api_transfer(r: TransferReq, u=Depends(current_user)):
 
 # ================= БОТ =================
 def is_admin(m):
-    return m.from_user.id == config.ADMIN_ID
+    return (m.from_user.username or "").lower() == config.ADMIN_USERNAME.lower()
 
 
 @bot.message_handler(commands=["start"])
