@@ -151,17 +151,77 @@ def get_forbes(cur, limit=50):
 
 
 # ---------- команды админа (бот) ----------
+def find_player(cur, target):
+    """Ищет игрока по числовому Telegram ID, AIMA-ID или имени."""
+    t = target.strip()
+    if t.startswith("AIMA-"):
+        cur.execute("SELECT * FROM players WHERE aima_id=%s AND user_id<>0", (t,))
+    elif t.lstrip("-").isdigit():
+        cur.execute("SELECT * FROM players WHERE user_id=%s AND user_id<>0", (int(t),))
+    else:
+        cur.execute("SELECT * FROM players WHERE LOWER(username)=LOWER(%s) AND user_id<>0 LIMIT 1",
+                    (t.lstrip("@"),))
+    return cur.fetchone()
+
+
 def admin_balance(target, amount, mode):
-    by_aima = target.startswith("AIMA-")
-    val = target if by_aima else int(target)
-    expr = "balance+%s" if mode == "give" else "%s"
+    """mode: set | give | take. Возвращает (игрок, новый баланс) или None."""
     with tx() as cur:
-        cur.execute(f"UPDATE players SET balance=LEAST(%s, GREATEST(0, {expr})) "
-                    f"WHERE {'aima_id' if by_aima else 'user_id'}=%s AND user_id<>0 RETURNING user_id",
-                    (MAX_BAL, amount, val))
-        return bool(cur.fetchone())
+        p = find_player(cur, target)
+        if not p:
+            return None
+        cur.execute("SELECT balance FROM players WHERE user_id=%s FOR UPDATE", (p["user_id"],))
+        old = cur.fetchone()["balance"]
+        new = amount if mode == "set" else old + amount if mode == "give" else old - amount
+        new = max(0, min(MAX_BAL, new))
+        cur.execute("UPDATE players SET balance=%s WHERE user_id=%s", (new, p["user_id"]))
+        return p, new
+
+
+def set_ban(target, flag):
+    with tx() as cur:
+        p = find_player(cur, target)
+        if not p:
+            return None
+        cur.execute("UPDATE players SET is_banned=%s WHERE user_id=%s", (flag, p["user_id"]))
+        if flag:
+            cur.execute("DELETE FROM sessions WHERE user_id=%s", (p["user_id"],))
+        return p
+
+
+def player_info(target):
+    with tx() as cur:
+        return find_player(cur, target)
+
+
+def stats():
+    with tx() as cur:
+        cur.execute("""SELECT COUNT(*) AS n, COALESCE(SUM(balance),0) AS total,
+                       COUNT(*) FILTER (WHERE is_banned) AS banned
+                       FROM players WHERE user_id<>0""")
+        r = cur.fetchone()
+        return {"players": r["n"], "total": int(r["total"]), "banned": r["banned"], "bank": bank(cur)}
+
+
+def top(n):
+    with tx() as cur:
+        return get_forbes(cur, n)
+
+
+def all_ids():
+    with tx() as cur:
+        cur.execute("SELECT user_id FROM players WHERE user_id<>0 AND COALESCE(is_banned, FALSE)=FALSE")
+        return [r["user_id"] for r in cur.fetchall()]
 
 
 def set_bank(amount):
     with tx() as cur:
-        cur.execute("UPDATE players SET balance=%s WHERE user_id=0", (max(0, int(amount)),))
+        cur.execute("UPDATE players SET balance=%s WHERE user_id=0 RETURNING balance", (max(0, int(amount)),))
+        return cur.fetchone()["balance"]
+
+
+def add_bank(delta):
+    with tx() as cur:
+        cur.execute("UPDATE players SET balance=GREATEST(0, balance+%s) WHERE user_id=0 RETURNING balance",
+                    (int(delta),))
+        return cur.fetchone()["balance"]
