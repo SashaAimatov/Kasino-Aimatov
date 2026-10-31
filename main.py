@@ -169,7 +169,35 @@ def api_transfer(r: TransferReq, u=Depends(current_user)):
 
 # ================= БОТ =================
 def is_admin(m):
-    return (m.from_user.username or "").lower() == config.ADMIN_USERNAME.lower()
+    return m.from_user.id == config.ADMIN_ID
+
+
+def reply(m, text):
+    bot.send_message(m.chat.id, text)
+
+
+def esc(x):
+    return html.escape(str(x if x is not None else ""))
+
+
+def num(s):
+    return int(float(s))
+
+
+def admin_cmd(*names):
+    """Команда доступна только админу; ошибки ввода объясняются, а не роняют бота."""
+    def deco(fn):
+        @bot.message_handler(commands=list(names), func=is_admin)
+        def wrapper(m):
+            try:
+                fn(m, m.text.split()[1:])
+            except (ValueError, IndexError):
+                reply(m, "⚠️ Неверный формат. Все команды и примеры: /admin")
+            except Exception as e:
+                logging.exception("admin command failed")
+                reply(m, f"❌ Ошибка: {esc(type(e).__name__)}")
+        return wrapper
+    return deco
 
 
 @bot.message_handler(commands=["start"])
@@ -184,37 +212,162 @@ def cmd_start(message):
     bot.send_message(
         message.chat.id,
         f"🏛 <b>Aimatov Silver Group</b>\n\n"
-        f"👤 Игрок: <b>{html.escape(p['username'] or '')}</b>\n"
+        f"👤 Игрок: <b>{esc(p['username'])}</b>\n"
         f"💳 Ваш AIMA-ID:\n<code>{p['aima_id']}</code>\n"
         f"💰 Счет игрока: <b>{int(p['balance']):,} ASG</b>",
         reply_markup=markup)
 
 
-@bot.message_handler(commands=["setbal", "set", "give"], func=is_admin)
-def cmd_balance(message):
-    a = message.text.split()
-    mode = "give" if a[0].startswith("/give") else "set"
-    if len(a) != 3:
-        bot.send_message(message.chat.id, f"⚠️ Формат: <code>/{'give' if mode == 'give' else 'setbal'} ID СУММА</code>")
-        return
-    try:
-        amount = int(float(a[2]))
-        ok = db.admin_balance(a[1].strip(), amount, mode)
-    except ValueError:
-        bot.send_message(message.chat.id, "⚠️ ID и сумма должны быть числами (или AIMA-ID).")
-        return
-    text = f"✅ <code>{html.escape(a[1])}</code>: {'начислено' if mode == 'give' else 'баланс'} {amount:,} ASG" \
-        if ok else "❌ Игрок не найден."
-    bot.send_message(message.chat.id, text)
+@bot.message_handler(commands=["whoami"])
+def cmd_whoami(message):
+    u = message.from_user
+    bot.send_message(
+        message.chat.id,
+        f"ID: <code>{u.id}</code>\n"
+        f"Ник: {'@' + esc(u.username) if u.username else 'не задан'}\n"
+        f"Админ: {'да' if is_admin(message) else 'нет'}")
 
 
-@bot.message_handler(commands=["casino"], func=is_admin)
-def cmd_casino(message):
-    a = message.text.split()
+HELP = (
+    "🛠 <b>Команды админа</b>\n\n"
+    "💰 <b>Баланс игроков</b>\n"
+    "/give ID СУММА — выдать деньги\n"
+    "/take ID СУММА — списать деньги\n"
+    "/setbal ID СУММА — установить точный баланс (то же: /set)\n"
+    "/reset ID — сбросить баланс до 500 000\n\n"
+    "🚫 <b>Блокировки</b>\n"
+    "/ban ID — забанить (игра и API закрываются)\n"
+    "/unban ID — разбанить\n\n"
+    "🏛 <b>Казино</b>\n"
+    "/casino — показать банк\n"
+    "/casino СУММА — установить банк\n"
+    "/casinoadd СУММА — добавить в банк (с минусом — убавить)\n\n"
+    "📊 <b>Информация</b>\n"
+    "/player ID — карточка игрока\n"
+    "/top N — богатейшие игроки (по умолчанию 10)\n"
+    "/stats — игроков, деньги на руках, банк, баны\n\n"
+    "📣 <b>Рассылка</b>\n"
+    "/broadcast ТЕКСТ — сообщение всем незабаненным игрокам\n\n"
+    "ID — числовой Telegram ID, AIMA-ID или имя игрока.\n"
+    "Пример: /give 5399819309 5000\n"
+    "Потолок баланса игрока: 50 000 000 ASG."
+)
+
+
+@admin_cmd("admin")
+def c_admin(m, a):
+    reply(m, HELP)
+
+
+def _balance(m, a, mode):
+    amount = num(a[1])
+    r = db.admin_balance(a[0], amount, mode)
+    if not r:
+        return reply(m, "❌ Игрок не найден.")
+    p, new = r
+    what = {"set": "Баланс установлен", "give": f"Выдано {amount:,} ASG", "take": f"Списано {amount:,} ASG"}[mode]
+    reply(m, f"✅ {esc(p['username'])} (<code>{p['user_id']}</code>)\n{what}\n💰 Баланс: <b>{new:,} ASG</b>")
+
+
+@admin_cmd("setbal", "set")
+def c_set(m, a):
+    _balance(m, a, "set")
+
+
+@admin_cmd("give")
+def c_give(m, a):
+    _balance(m, a, "give")
+
+
+@admin_cmd("take")
+def c_take(m, a):
+    _balance(m, a, "take")
+
+
+@admin_cmd("reset")
+def c_reset(m, a):
+    _balance(m, [a[0], str(db.START_BAL)], "set")
+
+
+def _ban(m, a, flag):
+    p = db.player_info(a[0])
+    if p and p["user_id"] == config.ADMIN_ID:
+        return reply(m, "❌ Себя банить нельзя.")
+    p = db.set_ban(a[0], flag)
+    if not p:
+        return reply(m, "❌ Игрок не найден.")
+    reply(m, f"{'🚫 Забанен' if flag else '✅ Разбанен'}: {esc(p['username'])} (<code>{p['user_id']}</code>)")
     try:
-        amount = int(float(a[1]))
-    except (IndexError, ValueError):
-        bot.send_message(message.chat.id, "⚠️ Формат: <code>/casino СУММА</code>")
-        return
-    db.set_bank(amount)
-    bot.send_message(message.chat.id, f"🏛 Банк Казино установлен на: <b>{max(0, amount):,} ASG</b>")
+        bot.send_message(p["user_id"], "🚫 Ваш аккаунт заблокирован." if flag else "✅ Ваш аккаунт разблокирован.")
+    except Exception:
+        pass  # игрок мог не запускать бота
+
+
+@admin_cmd("ban")
+def c_ban(m, a):
+    _ban(m, a, True)
+
+
+@admin_cmd("unban")
+def c_unban(m, a):
+    _ban(m, a, False)
+
+
+@admin_cmd("casino")
+def c_casino(m, a):
+    new = db.set_bank(num(a[0])) if a else db.stats()["bank"]
+    reply(m, f"🏛 Банк Казино: <b>{new:,} ASG</b>")
+
+
+@admin_cmd("casinoadd")
+def c_casinoadd(m, a):
+    reply(m, f"🏛 Банк Казино: <b>{db.add_bank(num(a[0])):,} ASG</b>")
+
+
+@admin_cmd("player")
+def c_player(m, a):
+    p = db.player_info(a[0])
+    if not p:
+        return reply(m, "❌ Игрок не найден.")
+    reply(m, f"👤 <b>{esc(p['username'])}</b>\n"
+             f"ID: <code>{p['user_id']}</code>\n"
+             f"AIMA-ID: <code>{p['aima_id']}</code>\n"
+             f"💰 Баланс: <b>{int(p['balance']):,} ASG</b>\n"
+             f"Статус: {'🚫 забанен' if p['is_banned'] else '✅ активен'}")
+
+
+@admin_cmd("top")
+def c_top(m, a):
+    n = max(1, min(num(a[0]) if a else 10, 30))
+    rows = db.top(n)
+    lines = [f"{i}. {esc(r['username'])} — {r['balance']:,} ASG" for i, r in enumerate(rows, 1)]
+    reply(m, "🏆 <b>Топ игроков</b>\n" + ("\n".join(lines) or "Пока никого."))
+
+
+@admin_cmd("stats")
+def c_stats(m, a):
+    s = db.stats()
+    reply(m, f"📊 <b>Статистика</b>\n"
+             f"Игроков: <b>{s['players']}</b> (забанено: {s['banned']})\n"
+             f"Деньги на руках: <b>{s['total']:,} ASG</b>\n"
+             f"Банк казино: <b>{s['bank']:,} ASG</b>")
+
+
+@admin_cmd("broadcast")
+def c_broadcast(m, a):
+    text = m.text.split(maxsplit=1)[1]
+    ids = db.all_ids()
+    reply(m, f"📣 Рассылка запущена: {len(ids)} получателей…")
+
+    def send():
+        ok = 0
+        for uid in ids:
+            try:
+                bot.send_message(uid, text, parse_mode=None)
+                ok += 1
+            except Exception:
+                pass  # игрок не запускал бота или заблокировал его
+            time.sleep(0.05)  # лимиты Telegram
+        reply(m, f"✅ Доставлено: {ok} из {len(ids)}")
+
+    threading.Thread(target=send, daemon=True).start()
